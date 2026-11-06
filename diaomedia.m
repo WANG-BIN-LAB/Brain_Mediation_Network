@@ -1,33 +1,66 @@
-function B = diaomedia(BOLD_timeries)
-j=size(BOLD_timeries,2);   %360 脑区数  时间点x脑区数
-B=cell(j,1);
+function [tensor, info] = diaomedia(roi, epsilonT, epsilonI, epsilonD, icTimeCourses, seed)
+validateattributes(roi, {'numeric'}, {'2d','real','finite','nonempty'});
+validateattributes(epsilonT, {'numeric'}, {'scalar','real','finite','positive'});
+validateattributes(epsilonI, {'numeric'}, {'scalar','real','finite','nonnegative'});
+validateattributes(epsilonD, {'numeric'}, {'scalar','real','finite','nonnegative'});
+roi = double(roi);
+[nTime,nParcels] = size(roi);
+assert(nTime > 23 && nParcels >= 20, 'Insufficient time points or parcels for 20 ICs.');
 
-for m=1:j%j
-    M=BOLD_timeries(:,m);        
-   for x=1:j
-    X=BOLD_timeries(:,x);
-    for y=1:j
-        Y=BOLD_timeries(:,y);
-        if (m==x || m==y || x==y)
-            m_value = 0;
-        else
-        [bp,p] = xiugai(X, Y, M); 
-        if ((p(1,1)<0.05 && p(1,2)<0.05) || p(1,5)<0.05)
-                if (p(1,3)>=0.05) 
-                    m_value = 1;
-                end
-         if (p(1,3)<0.05) 
-            if (bp(1,5) * bp(1,3) > 0)
-                m_value = bp(1,5) / bp(1,4);  %ab/c
-            else
-                m_value = 0;
-            end
-         end
-        end                
-        B{m,1}(x,y)=m_value;
-        end
-    end
-  end 
+if isempty(icTimeCourses)
+    icTimeCourses = bmn_fastica(roi,20,seed);
 end
-end
+validateattributes(icTimeCourses, {'numeric'}, ...
+    {'size',[nTime,20],'real','finite'});
+covariates = [ones(nTime,1), double(icTimeCourses)];
+assert(rank(covariates) == 21, 'IC time courses and intercept must have full rank.');
 
+% Residualization gives the same path slopes as including the same IC
+% covariates and intercept in each of the three OLS equations.
+[Q,~] = qr(covariates,0);
+residualROI = roi - Q * (Q' * roi);
+gram = residualROI' * residualROI;
+ss = diag(gram);
+validNode = ss > eps .* sum((roi - mean(roi,1)).^2,1)';
+total = gram ./ ss;
+diagonal = eye(nParcels) ~= 0;
+
+tensor = nan(nParcels,nParcels,nParcels);
+counts = zeros(nParcels,5);
+
+for m = 1:nParcels
+    eligible = ~diagonal;
+    eligible(m,:) = false;
+    eligible(:,m) = false;
+    possible = eligible & validNode & validNode' & validNode(m);
+
+    alpha = gram(:,m) ./ ss;
+    mediatorSS = ss(m) - alpha .* gram(:,m);
+    estimable = possible & (mediatorSS > sqrt(eps) * ss(m));
+    beta = (gram(m,:) - alpha .* gram) ./ mediatorSS;
+    indirect = alpha .* beta;
+    direct = total - indirect;
+    estimable = estimable & isfinite(indirect) & isfinite(total) & isfinite(direct);
+
+    nearZero = estimable & abs(total) <= epsilonT;
+    stable = estimable & ~nearZero;
+    noMediation = stable & abs(indirect) <= epsilonI;
+    suppression = stable & ~noMediation & ...
+        ((indirect > 0 & direct < 0) | (indirect < 0 & direct > 0));
+    complete = stable & ~noMediation & ~suppression & abs(direct) <= epsilonD;
+    partial = stable & ~noMediation & ~suppression & ~complete;
+
+    values = zeros(nParcels);
+    values(complete) = 1;
+    values(partial) = indirect(partial) ./ total(partial);
+    included = noMediation | complete | partial;
+    counts(m,:) = [nnz(eligible), nnz(included), nnz(nearZero), ...
+        nnz(suppression), nnz(eligible & ~estimable)];
+    values(~included) = NaN;
+    tensor(:,:,m) = values;
+end
+info.tripletCounts = array2table(counts, 'VariableNames', ...
+    {'Eligible','Included','NearZeroTotal','Suppression','NonEstimable'});
+info.epsilon = struct('total',epsilonT,'indirect',epsilonI,'direct',epsilonD);
+info.IC = icTimeCourses;
+end
