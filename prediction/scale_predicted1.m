@@ -1,3 +1,66 @@
+function [R, behav_pred, fold_info] = cpm_loocv_nested(all_mats, all_behav, age, sex, thresh)
+% all_mats: nodes x subjects (MA or MS). Encode sex as 0/1.
+% All vectors must follow the column order of all_mats.
+if nargin < 5
+    thresh = 0.05;
+end
+validateattributes(all_mats, {'numeric'}, {'2d','nonempty','real','finite'});
+X = double(all_mats');
+n = size(X, 1);
+validateattributes(all_behav, {'numeric'}, {'vector','numel',n,'real','finite'});
+validateattributes(age, {'numeric'}, {'vector','numel',n,'real','finite'});
+validateattributes(sex, {'numeric','logical'}, {'vector','numel',n,'binary'});
+validateattributes(thresh, {'numeric'}, {'scalar','real','>',0,'<',1});
+assert(n >= 5, 'At least five subjects are required.');
+
+y = double(all_behav(:));
+C = [ones(n,1), double(age(:)), double(sex(:))];
+behav_pred = nan(n,1);
+fold_info.n_pos = zeros(n,1);
+fold_info.n_neg = zeros(n,1);
+
+for held_out = 1:n
+    train = true(n,1);
+    train(held_out) = false;
+    C_train = C(train,:);
+    C_test = C(held_out,:);
+    assert(rank(C_train) == 3, 'Age and sex must be estimable in each training fold.');
+
+    x_coef = C_train \ X(train,:);
+    y_coef = C_train \ y(train);
+    x_train = X(train,:) - C_train * x_coef;
+    x_test = X(held_out,:) - C_test * x_coef;
+    y_train = y(train) - C_train * y_coef;
+
+    usable = std(x_train,0,1) > sqrt(eps) .* max(abs(X(train,:)),[],1);
+    x_train = x_train(:,usable);
+    x_test = x_test(:,usable);
+    pos = false(1,size(x_train,2));
+    neg = pos;
+    if any(usable) && norm(y_train) > sqrt(eps) * norm(y(train))
+        [rho,p] = corr(x_train,y_train,'Type','Spearman');
+        pos = (p < thresh & rho > 0)';
+        neg = (p < thresh & rho < 0)';
+    end
+    fold_info.n_pos(held_out) = nnz(pos);
+    fold_info.n_neg(held_out) = nnz(neg);
+
+    train_scores = [sum(x_train(:,pos),2), sum(x_train(:,neg),2)];
+    test_scores = [sum(x_test(:,pos),2), sum(x_test(:,neg),2)];
+    center = mean(train_scores,1);
+    scale = std(train_scores,0,1);
+    active = scale > sqrt(eps) .* max(abs(train_scores),[],1);
+    train_z = (train_scores(:,active) - center(active)) ./ scale(active);
+    test_z = (test_scores(:,active) - center(active)) ./ scale(active);
+
+    beta = lsqminnorm([ones(nnz(train),1), train_z], y_train);
+    % Restore the age/sex baseline to predict on the original scale.
+    behav_pred(held_out) = C_test * y_coef + [1, test_z] * beta;
+end
+
+fold_info.n_feat = fold_info.n_pos + fold_info.n_neg;
+R = corr(behav_pred,y,'Type','Spearman');
+end
 % Copyright 2015 Xilin Shen and Emily Finn 
 
 % This code is released under the terms of the GNU GPL v2. This code
