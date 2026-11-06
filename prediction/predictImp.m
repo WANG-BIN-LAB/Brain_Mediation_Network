@@ -8,8 +8,6 @@ N_MS = nan(n_sub, n_scale);
 
 for i = 1:n_scale
     liangbiao = liangbiaoAll(:, i);
-
     [M(i, 1), N_MA(:, i)] =  cpm_loocv_nested(A, liangbiao, age, sex, thresh);
-
     [M(i, 2), N_MS(:, i)] =  cpm_loocv_nested(B, liangbiao, age, sex, thresh);
 end
